@@ -1,20 +1,22 @@
 FUNCTION_BLOCK FB_UniversalVFD_CiA402
 VAR_INPUT
-    xEnable         : BOOL;  // Reglerfreigabe (Power)
+    xEnable         : BOOL;  // Reglerfreigabe (Power) (Zustand 0x0F)
     xRun            : BOOL;  // Start/Stop (Zustand 0x7F)
     xReset          : BOOL;  // Fehler quittieren (Bit 7: Fault Reset)
     xHalt           : BOOL;  // Achse anhalten (Bit 8: Halt)
     iTargetSpeed    : INT;   // Sollgeschwindigkeit (6042h)
     uiStatusWord    : UINT;  // Rücklesewert vom Antrieb (6041h)
+	uiErrorCode		: UINT;  // Errorcode vom Antrieb
 END_VAR
 
 VAR_OUTPUT
     uiControlWord   : UINT;  // Befehl an Antrieb (6040h)
-    iModeOfOp       : BYTE;  // Modus (VFD / Velocity = 2) (6060h)
+    iModeOfOp       : SINT;  // Modus (VFD / Velocity = 2) (6060h)
     iOutVelocity    : INT;   // Speed an Antrieb (6042h) vl target velocity! EDIT the OUTPUT Setting in Expertmode
     xReady          : BOOL;  // Betriebsbereit (Operation Enabled)
     xActive         : BOOL;  // Antrieb läuft
-    xError          : BOOL;  // Fehler aktiv (Bit 3)
+    xFault          : BOOL;  // Fehler aktiv (Bit 3)
+	xError			: BOOL;
 END_VAR
 
 VAR
@@ -37,40 +39,46 @@ END_VAR
 iModeOfOp := 2; 
 
 // 2. Fehlerprüfung
-xError := (uiStatusWord AND 16#0008) = 16#0008;
+xFault := (uiStatusWord AND 16#0008) = 16#0008;
+xError := (uiErrorCode <> 16#0000);
 
 // 3. CiA 402 Zustandsmaschine
-IF NOT xEnable THEN
-    uiControlWord := 16#0006; // Shutdown
-    iState := 0;
-    xReady := FALSE;
-    xActive := FALSE;
-ELSIF xReset THEN
-    uiControlWord := 16#0080; // Fault Reset Flanke
-    iState := 0;
+// Priorität: Der Reset-Befehl muss IMMER durchkommen
+IF xReset THEN
+    uiControlWord := 16#0080; // Fault Reset Flanke an Antrieb
+    iState        := 0;       // Schrittkette zurücksetzen
+    // xError wird erst FALSE, wenn der Antrieb den Reset quittiert hat
+
+//  Priorität: Abschalten bei fehlender Freigabe oder Fehler
+ELSIF NOT xEnable OR xError OR xFault THEN
+    uiControlWord := 16#0000; // Shutdown / Disable
+    iState        := 0;
+    xReady        := FALSE;
+    xActive       := FALSE;
+
+// Priorität: Normalbetrieb
 ELSE
     CASE iState OF
         0: // Ready to switch on?
-            uiControlWord := 16#0006;
-            IF (uiStatusWord AND 16#0001) = 16#0001 THEN iState := 10; END_IF
-            
-        10: // Switched on?
-            uiControlWord := 16#0007;
-            IF (uiStatusWord AND 16#0002) = 16#0002 THEN iState := 20; END_IF
-            
-        20: // Operation enabled?
+            IF (uiStatusWord AND 16#0001) = 16#0001 THEN 
+				xReady := TRUE;
+				iState := 10; 
+			END_IF
+                       
+        10: // Operation Switched ON?
             uiControlWord := 16#000F;
-            IF (uiStatusWord AND 16#0004) = 16#0004 THEN
-                xReady := TRUE;
-                IF xRun THEN iState := 30; END_IF
+			xActive := (uiStatusWord AND 16#0002) = 16#0002;
+            IF xActive THEN
+                IF xRun THEN 
+					iState := 20; 
+				END_IF
             END_IF
             
-        30: // Run (Inkl. herstellerspezifischer VFD-Bits 4,5,6 -> 0x7F)
+        20: // Run (Inkl. herstellerspezifischer VFD-Bits 4,5,6 -> 0x7F)
             uiControlWord := 16#007F;
-            xActive := (uiStatusWord AND 16#0004) = 16#0004;
             IF NOT xRun THEN 
                 xActive := FALSE;
-                iState := 20; 
+                iState := 10; 
             END_IF
     END_CASE
 END_IF
